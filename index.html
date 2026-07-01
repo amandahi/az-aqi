@@ -1,9 +1,4 @@
-#!/usr/bin/env python3
-"""Arizona AQI Dashboard — serves on http://localhost:8080"""
-
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-HTML = r'''<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -538,26 +533,4 @@ document.querySelectorAll('[data-view]').forEach(btn=>{
 load(period);
 </script>
 </body>
-</html>'''
-
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args): pass
-
-    def do_GET(self):
-        if self.path.split('?')[0] in ('/', '/index.html'):
-            body = HTML.encode('utf-8')
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', len(body))
-            self.end_headers()
-            self.wfile.write(body)
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-
-if __name__ == '__main__':
-    server = HTTPServer(('0.0.0.0', 8080), Handler)
-    print('Arizona AQI running on http://localhost:8080')
-    server.serve_forever()
+</html>
