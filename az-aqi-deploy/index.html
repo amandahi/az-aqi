@@ -228,24 +228,11 @@ function latestAQI(readings){
   return{aqi:worst.aqi,param:worst.parameter};
 }
 
-// AQI <= 20 is assumed to be a bogus/erroneous reading — used for map markers and
-// "best place to run" only; the raw readings still show up in the chart view.
-const MIN_VALID_AQI = 20;
-function currentAQI(readings){
-  const r=latestAQI(readings);
-  if(r.aqi!=null && r.aqi<=MIN_VALID_AQI) return{aqi:null,param:null};
-  return r;
-}
-
 function isActiveStation(st,p){
   if(!st.readings?.length) return false;
   const {aqi}=latestAQI(st.readings);
-  if(!aqi || aqi<=0) return false;
+  if(aqi==null) return false;
   return bucket(st.readings,p).some(s=>s.max!==null);
-}
-
-function mapEligibleStations(stations){
-  return stations.filter(st=>currentAQI(st.readings).aqi!=null);
 }
 
 function findWindForTime(hourly,ms){
@@ -326,8 +313,8 @@ function chart(readings,p,wind){
 
 function card(st){
   const{aqi,param}=latestAQI(st.readings);
-  const col=aqi?aqiColor(aqi):'rgba(255,255,255,.28)';
-  const lbl=aqi?aqiLabel(aqi):'—';
+  const col=aqi!=null?aqiColor(aqi):'rgba(255,255,255,.28)';
+  const lbl=aqi!=null?aqiLabel(aqi):'—';
   const dist=st.distMi<2?'📍 Primary Station':`${st.distMi} mi from Flagstaff`;
   const badge=st.source==='purpleair'
     ?'<span class="badge badge-pa">Community</span>'
@@ -355,7 +342,7 @@ function updateBestRunBox(stations){
   if(!paStations.length){box.style.display='none';return;}
   let best=null, bestAQI=Infinity;
   for(const st of paStations){
-    const{aqi}=currentAQI(st.readings);
+    const{aqi}=latestAQI(st.readings);
     if(aqi!=null && aqi<bestAQI){bestAQI=aqi;best=st;}
   }
   if(!best){box.style.display='none';return;}
@@ -385,13 +372,12 @@ function renderMap(data){
   markers=[];
   const bounds=[];
 
-  // AQI station markers (bogus-low readings <= 20 are excluded from the map)
+  // AQI station markers
   for(const st of data.stations){
-    const{aqi}=currentAQI(st.readings);
+    const{aqi}=latestAQI(st.readings);
     if(!st.lat||!st.lon) continue;
-    if(aqi==null) continue;
-    const col=aqiColor(aqi);
-    const lbl=aqiLabel(aqi);
+    const col=aqi!=null?aqiColor(aqi):'#555';
+    const lbl=aqi!=null?aqiLabel(aqi):'No data';
     const srcLabel=st.source==='purpleair'?'Community Sensor':'EPA Monitor';
     const distStr=st.distMi<2?'Flagstaff (primary)':`${st.distMi} mi from Flagstaff`;
     const icon=L.divIcon({
@@ -399,11 +385,11 @@ function renderMap(data){
       html:`<div style="width:42px;height:42px;border-radius:50%;background:${col};
         border:2.5px solid rgba(255,255,255,.75);display:flex;align-items:center;
         justify-content:center;font-size:11px;font-weight:700;color:#fff;
-        box-shadow:0 2px 14px ${col}80,0 0 0 5px ${col}22;cursor:pointer;">${aqi??'?'}</div>`,
+        box-shadow:0 2px 14px ${col}80,0 0 0 5px ${col}22;cursor:pointer;">${aqi!=null?aqi:'?'}</div>`,
       iconSize:[42,42], iconAnchor:[21,21], popupAnchor:[0,-24],
     });
     const popup=`<div class="mp-name">${st.name}</div>
-      <div class="mp-aqi" style="color:${col}">${aqi??'—'}</div>
+      <div class="mp-aqi" style="color:${col}">${aqi!=null?aqi:'—'}</div>
       <div class="mp-label" style="color:${col}">${lbl}</div>
       <div class="mp-meta">${srcLabel} &middot; ${distStr}</div>`;
     const m=L.marker([st.lat,st.lon],{icon}).bindPopup(popup,{maxWidth:220});
@@ -514,8 +500,8 @@ function render(data){
   const activeStations=data.stations.filter(st=>isActiveStation(st,period));
   document.getElementById('map-loading').style.display='none';
   if(view==='map'){
-    updateBestRunBox(mapEligibleStations(data.stations));
-    renderMap({...data, stations:mapEligibleStations(activeStations)});
+    updateBestRunBox(data.stations);
+    renderMap({...data, stations:activeStations});
   } else {
     document.getElementById('best-run-box').style.display='none';
     document.getElementById('grid').innerHTML=activeStations.map(card).join('');
@@ -548,8 +534,8 @@ document.querySelectorAll('[data-view]').forEach(btn=>{
       document.getElementById('best-run-box').style.display='block';
       if(cache[period]) {
         const active=cache[period].stations.filter(st=>isActiveStation(st,period));
-        updateBestRunBox(mapEligibleStations(cache[period].stations));
-        renderMap({...cache[period],stations:mapEligibleStations(active)});
+        updateBestRunBox(cache[period].stations);
+        renderMap({...cache[period],stations:active});
       }
     } else {
       document.getElementById('best-run-box').style.display='none';
