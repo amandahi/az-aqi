@@ -7,8 +7,8 @@ const PA_BOUNDS = { nwlng: -112.3, nwlat: 37.0, selng: -110.0, selat: 34.3 };
 const MAX_PA_LIST = 60;
 const PA_HISTORY_BATCH = 3;
 const MAX_DIST_MI = 20;
-const NWS_STATION = "KFLG";
-const NWS_HEADERS = { "User-Agent": "AZAQIDashboard/1.0 (amandahi@gmail.com)", "Accept": "application/geo+json" };
+const OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast";
+const WIND_COORD_PRECISION = 2; // ~1.1km grid — dedupe nearby stations onto one Open-Meteo query point
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -67,6 +67,56 @@ async function fetchHistoryBatched(
   return results;
 }
 
+function roundCoord(n: number): number {
+  return Math.round(n * 10 ** WIND_COORD_PRECISION) / 10 ** WIND_COORD_PRECISION;
+}
+
+// Fetches per-location wind history from Open-Meteo (free, no API key), batched into a single
+// request across all unique station coordinates so every station gets its own wind reading
+// instead of one global station's wind being applied to every marker.
+async function fetchWindBatched(
+  locations: { lat: number; lon: number }[], pastDays: number
+): Promise<Map<string, any[]>> {
+  const uniq = new Map<string, { lat: number; lon: number }>();
+  for (const loc of locations) {
+    const key = `${roundCoord(loc.lat)},${roundCoord(loc.lon)}`;
+    if (!uniq.has(key)) uniq.set(key, loc);
+  }
+  const keys = [...uniq.keys()];
+  const lats = keys.map(k => k.split(",")[0]).join(",");
+  const lons = keys.map(k => k.split(",")[1]).join(",");
+
+  const url = `${OPEN_METEO_URL}?${new URLSearchParams({
+    latitude: lats, longitude: lons,
+    hourly: "wind_speed_10m,wind_direction_10m",
+    wind_speed_unit: "mph",
+    past_days: String(pastDays),
+    forecast_days: "1",
+    timezone: "UTC",
+  })}`;
+
+  const result = new Map<string, any[]>();
+  try {
+    const res = await fetch(url);
+    const json = await res.json();
+    const arr = Array.isArray(json) ? json : [json];
+    arr.forEach((entry: any, i: number) => {
+      const hourly = entry?.hourly;
+      if (!hourly?.time) return;
+      const readings = hourly.time.map((t: string, idx: number) => ({
+        time: t.slice(0, 16),
+        dir: Math.round(hourly.wind_direction_10m[idx]),
+        compass: degToCompass(hourly.wind_direction_10m[idx]),
+        speedMph: Math.round(hourly.wind_speed_10m[idx]),
+      }));
+      result.set(keys[i], readings);
+    });
+  } catch (_e) {
+    // leave result empty — the frontend already handles missing wind gracefully
+  }
+  return result;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
 
@@ -119,16 +169,11 @@ Deno.serve(async (req: Request) => {
     selng: String(PA_BOUNDS.selng), selat: String(PA_BOUNDS.selat),
   })}`;
 
-  const nwsCurrentUrl = `https://api.weather.gov/stations/${NWS_STATION}/observations/latest`;
-  const nwsHourlyUrl = `https://api.weather.gov/stations/${NWS_STATION}/observations?start=${startTime.toISOString()}&end=${now.toISOString()}`;
-
-  const [airnowResult, paListResult, nwsCurrentResult, nwsHourlyResult] = await Promise.allSettled([
+  const [airnowResult, paListResult] = await Promise.allSettled([
     fetch(airnowUrl).then(r => r.json()),
     purpleairKey
       ? fetch(paListUrl, { headers: { "X-API-Key": purpleairKey } }).then(r => r.json())
       : Promise.resolve(null),
-    fetch(nwsCurrentUrl, { headers: NWS_HEADERS }).then(r => r.json()),
-    fetch(nwsHourlyUrl, { headers: NWS_HEADERS }).then(r => r.json()),
   ]);
 
   const sites: Record<string, any> = {};
@@ -194,28 +239,16 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const wind: any = { current: null, hourly: [] };
-  if (nwsCurrentResult.status === "fulfilled") {
-    const props = nwsCurrentResult.value?.properties;
-    if (props) {
-      const dir = props.windDirection?.value;
-      const spd = props.windSpeed?.value;
-      if (dir != null && spd != null) {
-        wind.current = { dir: Math.round(dir), compass: degToCompass(dir), speedKph: Math.round(spd), speedMph: Math.round(spd * 0.621371) };
-      }
-    }
-  }
-  if (nwsHourlyResult.status === "fulfilled" && nwsHourlyResult.value?.features) {
-    wind.hourly = nwsHourlyResult.value.features
-      .map((f: any) => {
-        const p = f.properties;
-        const dir = p.windDirection?.value;
-        const spd = p.windSpeed?.value;
-        if (dir == null || spd == null) return null;
-        return { time: p.timestamp?.slice(0, 16).replace("+00:00", ""), dir: Math.round(dir), compass: degToCompass(dir), speedMph: Math.round(spd * 0.621371) };
-      })
-      .filter(Boolean)
-      .reverse();
+  // Per-station wind: each station gets its own Open-Meteo history for its exact coordinates,
+  // instead of one global reading applied to every station.
+  const pastDays = Math.max(1, Math.ceil(hoursBack / 24));
+  const siteValues = Object.values(sites) as any[];
+  const windByCoord = siteValues.length
+    ? await fetchWindBatched(siteValues.map(s => ({ lat: s.lat, lon: s.lon })), pastDays)
+    : new Map<string, any[]>();
+  for (const s of siteValues) {
+    const coordKey = `${roundCoord(s.lat)},${roundCoord(s.lon)}`;
+    s.wind = { hourly: windByCoord.get(coordKey) ?? [] };
   }
 
   const stations = Object.values(sites)
@@ -226,7 +259,7 @@ Deno.serve(async (req: Request) => {
       return a.distMi - b.distMi;
     });
 
-  const result = { stations, period, timestamp: now.toISOString(), wind };
+  const result = { stations, period, timestamp: now.toISOString() };
 
   // Write to Postgres cache (fire and forget — don't block the response)
   sb.from("aqi_cache")
