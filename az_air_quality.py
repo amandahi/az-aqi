@@ -441,7 +441,10 @@ document.addEventListener('mousemove',e=>{
 
 // ── Refresh ───────────────────────────────────────────────────────────────────
 function refreshData(){
-  Object.keys(cache).forEach(k=>delete cache[k]);
+  Object.keys(cache).forEach(k=>{
+    delete cache[k];
+    try{localStorage.removeItem(`aqi-cache-${k}`);}catch(_){}
+  });
   windData=null;
   const btn=document.getElementById('refresh-btn');
   btn.classList.add('spinning');
@@ -452,18 +455,35 @@ function refreshData(){
 // ── Load / Render ─────────────────────────────────────────────────────────────
 async function load(p){
   if(cache[p]){render(cache[p]);return;}
+
+  // Show stale localStorage data immediately if < 10 min old
+  const lsKey=`aqi-cache-${p}`;
+  try{
+    const stored=localStorage.getItem(lsKey);
+    if(stored){
+      const{data,ts}=JSON.parse(stored);
+      if(Date.now()-ts < 10*60*1000){
+        cache[p]=data;
+        render(data); // instant render — fresh fetch continues below
+      }
+    }
+  }catch(e){localStorage.removeItem(lsKey);}
+
   const lbl=p==='24h'?'24-hour':p==='3d'?'3-day':'7-day';
-  document.getElementById('grid').innerHTML=`<div class="state-box"><div class="spinner"></div><span>Loading ${lbl} data&hellip;</span></div>`;
-  document.getElementById('legend').style.display='none';
+  if(!cache[p]){
+    document.getElementById('grid').innerHTML=`<div class="state-box"><div class="spinner"></div><span>Loading ${lbl} data&hellip;</span></div>`;
+    document.getElementById('legend').style.display='none';
+  }
   try{
     const res=await fetch(`${FN}?period=${p}`,{headers:{Authorization:`Bearer ${KEY}`}});
     if(!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     const data=await res.json();
     if(data.error) throw new Error(data.error);
     cache[p]=data;
+    try{localStorage.setItem(lsKey,JSON.stringify({data,ts:Date.now()}));}catch(_){}
     render(data);
   }catch(e){
-    document.getElementById('grid').innerHTML=`<div class="err-box">&#x26A0;&#xFE0F; ${e.message}</div>`;
+    if(!cache[p]) document.getElementById('grid').innerHTML=`<div class="err-box">&#x26A0;&#xFE0F; ${e.message}</div>`;
   }
 }
 
